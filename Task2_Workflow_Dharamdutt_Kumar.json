@@ -1,0 +1,415 @@
+{
+  "name": "Task2_GitHub_Intelligence_Workflow_Dharamdutt_Kumar",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * *"
+            }
+          ]
+        }
+      },
+      "id": "node-schedule-trigger",
+      "name": "Schedule Trigger (Daily 08:00 AM)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "trigger-github-digest",
+        "responseMode": "onReceived",
+        "responseData": "Workflow triggered successfully."
+      },
+      "id": "node-webhook-trigger",
+      "name": "Webhook Trigger (On-Demand)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        100,
+        480
+      ],
+      "webhookId": "oytra-assessment-manual-trigger"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.github.com/search/repositories",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "stars:>1000 language:typescript sort:stars"
+            },
+            {
+              "name": "sort",
+              "value": "stars"
+            },
+            {
+              "name": "order",
+              "value": "desc"
+            },
+            {
+              "name": "per_page",
+              "value": "15"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github.v3+json"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Oytra-Automation-QA-Assessment-Dharamdutt"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000,
+          "allowUnauthorizedCerts": false
+        }
+      },
+      "id": "node-fetch-github",
+      "name": "Fetch Top GitHub Repositories",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        360,
+        380
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate response from Primary API (GitHub REST API)\nconst response = $input.first();\n\nif (!response || !response.json || !response.json.items) {\n  const errMsg = response?.json?.message || \"Failed to fetch GitHub repositories or rate limit exceeded.\";\n  throw new Error(`[Primary API Error] ${errMsg}`);\n}\n\nconst rawRepos = response.json.items;\n\n// Filter out archived repos and sort by stars descending\nconst activeRepos = rawRepos\n  .filter(repo => !repo.archived && !repo.disabled)\n  .sort((a, b) => b.stargazers_count - a.stargazers_count);\n\n// Take top 5 candidates for enrichment\nconst top5 = activeRepos.slice(0, 5);\n\n// Normalize structured data objects\nreturn top5.map((repo, idx) => ({\n  json: {\n    rank: idx + 1,\n    repo_id: repo.id,\n    name: repo.name,\n    full_name: repo.full_name,\n    owner: repo.owner.login,\n    html_url: repo.html_url,\n    description: repo.description || 'No description provided.',\n    stars: repo.stargazers_count,\n    forks: repo.forks_count,\n    open_issues: repo.open_issues_count,\n    language: repo.language || 'TypeScript',\n    license: repo.license ? repo.license.name : 'Not Specified',\n    updated_at: repo.updated_at,\n    is_high_impact: repo.stargazers_count >= 25000\n  }\n}));"
+      },
+      "id": "node-transform-filter",
+      "name": "Transform & Filter Top 5",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.github.com/repos/{{ $json.full_name }}/releases/latest",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github.v3+json"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Oytra-Automation-QA-Assessment-Dharamdutt"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 8000
+        }
+      },
+      "id": "node-enrich-release",
+      "name": "Enrich with Latest Release API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        380
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge primary repository data with secondary release API enrichment\nconst inputItem = $input.item;\nconst primaryData = $('Transform & Filter Top 5').item.json;\nconst releaseData = inputItem.json;\n\n// Check if enrichment API succeeded or 404'd (repos with no formal releases)\nconst hasRelease = releaseData && releaseData.tag_name && !releaseData.message;\n\nreturn {\n  json: {\n    ...primaryData,\n    enrichment: {\n      has_formal_release: Boolean(hasRelease),\n      latest_version: hasRelease ? releaseData.tag_name : 'No formal release published',\n      release_name: hasRelease ? (releaseData.name || releaseData.tag_name) : 'N/A',\n      published_at: hasRelease ? releaseData.published_at : null,\n      release_notes_url: hasRelease ? releaseData.html_url : primaryData.html_url,\n      prerelease: hasRelease ? releaseData.prerelease : false\n    }\n  }\n};"
+      },
+      "id": "node-merge-enrichment",
+      "name": "Merge Enriched Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-stars-threshold",
+              "leftValue": "={{ $json.stars }}",
+              "rightValue": 25000,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-if-high-impact",
+      "name": "IF: High-Impact Tier (Stars >= 25k)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format High-Priority Alert Payload (Stars >= 25,000)\nconst items = $input.all();\n\nconst summaryCards = items.map(i => {\n  const d = i.json;\n  return `⭐ **[${d.full_name}](${d.html_url})**\\n` +\n         `• **Stars:** ${d.stars.toLocaleString()} | **Forks:** ${d.forks.toLocaleString()} | **Issues:** ${d.open_issues}\\n` +\n         `• **Latest Release:** \\`${d.enrichment.latest_version}\\` ${d.enrichment.published_at ? `(${d.enrichment.published_at.substring(0, 10)})` : ''}\\n` +\n         `• **Description:** ${d.description}\\n`;\n}).join('\\n');\n\nconst messageBody = `🔥 **[HIGH-IMPACT DIGEST] Top Tier Open Source Repositories**\\n\\n` +\n  `Generated: ${new Date().toISOString()}\\n\\n` +\n  summaryCards;\n\nreturn {\n  json: {\n    channel: \"high-priority-dev-feed\",\n    priority: \"HIGH\",\n    item_count: items.length,\n    content: messageBody,\n    payload: {\n      username: \"Oytra Tech Intelligence Bot\",\n      avatar_url: \"https://cdn-icons-png.flaticon.com/512/3291/3291695.png\",\n      content: messageBody\n    }\n  }\n};"
+      },
+      "id": "node-format-high",
+      "name": "Format High-Priority Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1640,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format Standard Digest Payload (< 25,000 Stars)\nconst items = $input.all();\n\nconst summaryCards = items.map(i => {\n  const d = i.json;\n  return `📦 **[${d.full_name}](${d.html_url})** - ${d.stars.toLocaleString()} stars\\n` +\n         `• Release: \\`${d.enrichment.latest_version}\\` | Language: ${d.language}\\n`;\n}).join('\\n');\n\nconst messageBody = `📋 **[STANDARD DIGEST] Trending Repositories (< 25k Stars)**\\n\\n` + summaryCards;\n\nreturn {\n  json: {\n    channel: \"general-dev-feed\",\n    priority: \"STANDARD\",\n    item_count: items.length,\n    content: messageBody,\n    payload: {\n      username: \"Oytra Tech Intelligence Bot\",\n      content: messageBody\n    }\n  }\n};"
+      },
+      "id": "node-format-standard",
+      "name": "Format Standard Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1640,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://webhook.site/placeholder-oytra-notification-endpoint",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ $json.payload }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Notification-Priority",
+              "value": "={{ $json.priority }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "node-dispatch-notification",
+      "name": "Dispatch Notification Channel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1940,
+        380
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {},
+      "id": "node-error-trigger",
+      "name": "Error Trigger (Global Handler)",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        100,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://webhook.site/placeholder-oytra-incident-endpoint",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ {\n    \"event\": \"WORKFLOW_EXECUTION_FAILURE\",\n    \"workflow_name\": $execution.workflow.name,\n    \"execution_id\": $execution.id,\n    \"failing_node\": $execution.lastNodeExecuted,\n    \"error_message\": $execution.error.message,\n    \"timestamp\": $now.toISOString(),\n    \"severity\": \"CRITICAL\"\n} }}",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "node-alert-error",
+      "name": "Dispatch Failure Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        360,
+        720
+      ],
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "Schedule Trigger (Daily 08:00 AM)": {
+      "main": [
+        [
+          {
+            "node": "Fetch Top GitHub Repositories",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Trigger (On-Demand)": {
+      "main": [
+        [
+          {
+            "node": "Fetch Top GitHub Repositories",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Top GitHub Repositories": {
+      "main": [
+        [
+          {
+            "node": "Transform & Filter Top 5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transform & Filter Top 5": {
+      "main": [
+        [
+          {
+            "node": "Enrich with Latest Release API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrich with Latest Release API": {
+      "main": [
+        [
+          {
+            "node": "Merge Enriched Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Enriched Data": {
+      "main": [
+        [
+          {
+            "node": "IF: High-Impact Tier (Stars >= 25k)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: High-Impact Tier (Stars >= 25k)": {
+      "main": [
+        [
+          {
+            "node": "Format High-Priority Digest",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Standard Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format High-Priority Digest": {
+      "main": [
+        [
+          {
+            "node": "Dispatch Notification Channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Standard Digest": {
+      "main": [
+        [
+          {
+            "node": "Dispatch Notification Channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger (Global Handler)": {
+      "main": [
+        [
+          {
+            "node": "Dispatch Failure Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "oytra-assessment-dharamdutt-kumar"
+  },
+  "tags": [
+    {
+      "name": "QA Assessment"
+    },
+    {
+      "name": "GitHub API"
+    },
+    {
+      "name": "Automation"
+    }
+  ]
+}
